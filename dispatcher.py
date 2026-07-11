@@ -56,8 +56,13 @@ BRT = timezone(timedelta(hours=-3))
 TODAY = datetime.now(BRT).date()
 
 # ---------------------------------------------------------------- HTTP / dados
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
 def http_get(url, headers=None, timeout=30):
-    req = urllib.request.Request(url, headers=headers or {})
+    h = {"User-Agent": UA, "Accept-Language": "pt-BR,pt;q=0.9"}
+    h.update(headers or {})
+    req = urllib.request.Request(url, headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
 
@@ -93,7 +98,7 @@ def rest(path, key):
     with urllib.request.urlopen(req, timeout=40) as r:
         return json.loads(r.read().decode("utf-8"))
 
-# ---------------------------------------------------------------- helpers
+# ----------------------------------------------------------------- helpers
 def brl(n):
     return "R$ " + f"{float(n):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -234,15 +239,14 @@ def build_pool(key):
         if not pid or pid in seen: continue
         if not p.get("final_price") or float(p["final_price"]) <= 0: continue
         if not p.get("original_price") or float(p["original_price"]) <= 0: continue
-        if not p.get("link"): continue          # precisa do link de afiliado
-        if pct_of(p) <= 0: continue              # só queda real
+        if not p.get("link"): continue
+        if pct_of(p) <= 0: continue
         seen.add(pid); out.append(p)
     return out
 
 def score(p, recent):
     s = pct_of(p)
     if is_live(p): s += LIVE_BONUS
-    # leve prioridade para quem ainda não foi postado
     if p["id"] not in recent: s += 5
     return s
 
@@ -252,21 +256,15 @@ def main():
     pool = build_pool(key)
     recent = load_recent_ids()
     print(f"  pool={len(pool)} · já postados (janela {DEDUPE_DAYS}d)={len(recent)}")
-
-    # elegíveis: não repetir, exceto super ofertas
     elig = [p for p in pool if p["id"] not in recent or pct_of(p) >= SUPER_DROP]
     elig.sort(key=lambda p: score(p, recent), reverse=True)
-
     picks, used = [], set()
     for p in elig:
-        # evita 2 posts quase idênticos (mesmo nome base)
         base_name = re.sub(r"\s+(masculino|feminino|unissex).*$", "", p["name"].lower())
         if base_name in used: continue
         used.add(base_name); picks.append(p)
         if len(picks) >= N_PRODUCTS: break
-
     print(f"  selecionados={len(picks)} (LIVE={sum(1 for x in picks if is_live(x))})\n")
-
     posted_ids = []
     for i, p in enumerate(picks, 1):
         cap = caption(p); photo = image_proxy(p.get("image_url")); buy = p.get("link")
@@ -280,8 +278,6 @@ def main():
             except Exception as e:
                 print(f"   ✗ falha: {e}")
             time.sleep(DELAY)
-
-    # Guia de Cupons (Grupo 1 às 07:00, Grupo 2 às 16:00)
     g = guia_text(SLOT)
     if g:
         print("── GUIA DE CUPONS ──\n" + g + "\n")
@@ -290,7 +286,6 @@ def main():
                 r = send_text(g); print("   ✓ guia enviado" if r.get("ok") else f"   ✗ {r}")
             except Exception as e:
                 print(f"   ✗ falha guia: {e}")
-
     if SEND and posted_ids:
         record_posted(posted_ids)
         print(f"\n  dedupe: {len(posted_ids)} ids gravados em {state_path(TODAY)}")
