@@ -232,13 +232,16 @@ def guia_text(slot):
 
 # ---------------------------------------------------------------- dedupe (arquivos no repo)
 def state_path(d):  return os.path.join(STATE_DIR, f"posted_{d.isoformat()}.json")
+def load_ids_for(d):
+    p = state_path(d)
+    if os.path.exists(p):
+        try: return set(json.load(open(p)))
+        except Exception: pass
+    return set()
 def load_recent_ids():
     ids = set()
     for i in range(DEDUPE_DAYS):
-        p = state_path(TODAY - timedelta(days=i))
-        if os.path.exists(p):
-            try: ids.update(json.load(open(p)))
-            except Exception: pass
+        ids |= load_ids_for(TODAY - timedelta(days=i))
     return ids
 def record_posted(new_ids):
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -355,13 +358,14 @@ def collect(key):
                               f"&limit=25"), key, label="servico")
     return d
 
-def pick_shoes(d, recent):
+def pick_shoes(d, recent, today):
     # prioridade: caiu de preço -> tênis em destaque -> pool (nomes com "tênis")
     pool_shoes = [p for p in d["pool"] if "tênis" in (p.get("name") or "").lower() or "tenis" in (p.get("name") or "").lower()]
     cand = dedupe_by_id([p for p in (d["price_drops"] + d["hero_shoes"] + pool_shoes) if valid_product(p)])
     cand.sort(key=lambda p: pct_of(p) + (LIVE_BONUS if is_live(p) else 0), reverse=True)
     out, used = [], set()
     for p in cand:
+        if p["id"] in today: continue                     # NUNCA repete no mesmo dia
         if p["id"] in recent and pct_of(p) < SUPER_DROP: continue
         bn = base_name(p["name"])
         if bn in used: continue
@@ -369,12 +373,13 @@ def pick_shoes(d, recent):
         if len(out) >= N_SHOES: break
     return out
 
-def pick_varied(d, recent, taken):
+def pick_varied(d, recent, today, taken):
     cand = dedupe_by_id([p for p in (d["essentials"] + d["pool"]) if valid_product(p)])
     cand.sort(key=lambda p: pct_of(p) + (LIVE_BONUS if is_live(p) else 0), reverse=True)
     out, used_store = [], set()
     for p in cand:
         if p["id"] in taken: continue
+        if p["id"] in today: continue                     # NUNCA repete no mesmo dia
         if p["id"] in recent and pct_of(p) < SUPER_DROP: continue
         store = (p.get("brand_name") or p.get("product_brand") or "").lower()
         if store in used_store: continue          # variar as lojas
@@ -382,10 +387,11 @@ def pick_varied(d, recent, taken):
         if len(out) >= N_VARIED: break
     return out
 
-def rotate(items, n):
-    items = [p for p in items if p.get("id")]
+def rotate(items, n, today):
+    # nunca repete item já postado hoje; blocos de n avançam por slot (sem sobrepor)
+    items = [p for p in items if p.get("id") and p["id"] not in today]
     if not items: return []
-    start = (TODAY.toordinal() * 4 + SLOT_IDX) % len(items)
+    start = ((TODAY.toordinal() * 4 + SLOT_IDX) * n) % len(items)
     return [items[(start + i) % len(items)] for i in range(min(n, len(items)))]
 
 def main():
@@ -393,19 +399,20 @@ def main():
     key = get_anon_key()
     d = collect(key)
     recent = load_recent_ids()
+    today  = load_ids_for(TODAY)
     print(f"  fontes: drops={len(d['price_drops'])} hero={len(d['hero_shoes'])} "
           f"ess={len(d['essentials'])} pool={len(d['pool'])} provas={len(d['provas'])} "
-          f"viagem={len(d['viagem'])} servico={len(d['servico'])} · janela={len(recent)}")
+          f"viagem={len(d['viagem'])} servico={len(d['servico'])} · janela={len(recent)} · hoje={len(today)}")
 
-    shoes  = pick_shoes(d, recent)
+    shoes  = pick_shoes(d, recent, today)
     taken  = {p["id"] for p in shoes}
-    varied = pick_varied(d, recent, taken)
+    varied = pick_varied(d, recent, today, taken)
     for p in d["viagem"]:  p["kind"] = "viagem"
     for p in d["provas"]:  p["kind"] = "prova"
     for p in d["servico"]: p["kind"] = "servico"
-    viagem  = rotate(d["viagem"], N_VIAGEM)
-    provas  = rotate([p for p in d["provas"] if p.get("link")], N_PROVAS)
-    servico = rotate([p for p in d["servico"] if p.get("link")], N_SERVICO)
+    viagem  = rotate(d["viagem"], N_VIAGEM, today)
+    provas  = rotate([p for p in d["provas"] if p.get("link")], N_PROVAS, today)
+    servico = rotate([p for p in d["servico"] if p.get("link")], N_SERVICO, today)
 
     # ordem do disparo: tênis -> variados -> viagem -> provas -> serviço
     items = shoes + varied + viagem + provas + servico
@@ -423,7 +430,7 @@ def main():
             print(f"   ✓ enviado{nota}" if ok else f"   ✗ {r}")
             if ok:
                 sent += 1
-                if it["kind"] == "produto": posted_ids.append(it["id"])
+                posted_ids.append(it["id"])   # grava TODOS os tipos (produto, prova, viagem, serviço)
             time.sleep(DELAY)
     if SEND:
         print(f"\n  == ENVIADOS: {sent}/{len(items)} ==")
