@@ -21,7 +21,7 @@ PRINCÍPIOS:
   • Sem repetir o mesmo produto por DEDUPE_DAYS dias (super ofertas podem repetir).
 """
 
-import os, re, sys, json, time, html, base64, urllib.request, urllib.parse
+import os, re, sys, json, time, html, base64, unicodedata, urllib.request, urllib.parse
 from datetime import datetime, timedelta, timezone
 
 SUPA_URL = "https://jpjhgetlhlnryalplqcf.supabase.co"
@@ -125,8 +125,13 @@ def pct_of(p):
         return round((float(de) - float(por)) / float(de) * 100)
     return 0
 
+_STOP = {"masculino", "feminino", "unissex", "tenis", "de", "para"}
 def base_name(name):
-    return re.sub(r"\s+(masculino|feminino|unissex).*$", "", (name or "").lower()).strip()
+    # chave do MODELO: sem acentos/cores/gênero -> "qiaodan feiying pro 3"
+    n = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode().lower()
+    n = re.sub(r"[^a-z0-9\s]", " ", n)
+    toks = [t for t in n.split() if t not in _STOP]
+    return " ".join(toks[:4])
 
 def fmt_date(d):
     try:
@@ -141,17 +146,30 @@ def crossed(de, por):
     return None
 
 # ---------------------------------------------------------------- legendas
+VITRINE_LABEL = {
+    "caiu":       "📉 CAIU DE PREÇO",
+    "destaque":   "👟 TÊNIS EM DESTAQUE",
+    "essenciais": "🎒 ESSENCIAIS DO CORREDOR",
+    "pool":       "🛍 ACHADINHOS DO CORREDOR",
+}
+
 def cap_produto(p):
     marca = (p.get("product_brand") or p.get("brand_name") or "").upper()
     de, por = float(p["original_price"]), float(p["final_price"])
-    if p.get("coupon_code"):
-        hl = f"🎟 CUPOM DA {marca}"
+    pct = int(pct_of(p))
+    vit = VITRINE_LABEL.get(p.get("vitrine"), "🛍 OFERTA RUNNERS BRASIL")
+    t = crossed(de, por)
+    if pct >= SUPER_DROP:
+        hl = f"🚨 BAIXOU DEMAIS: {pct}% OFF"
+    elif t:
+        hl = f"💰 {marca} POR MENOS DE R$ " + f"{t:,}".replace(",", ".")
+    elif p.get("coupon_code"):
+        hl = f"🎟 CUPOM DA {marca} ATIVADO"
     else:
-        t = crossed(de, por)
-        hl = (f"💰 {marca} POR MENOS DE R$ " + f"{t:,}".replace(",", ".")) if t \
-             else ("🔥 OFERTA DO DIA" if pct_of(p) >= SUPER_DROP else "🔥 BAITA PREÇO")
+        hl = f"🔥 OFERTA DO DIA: {pct}% OFF"
     g = gender(p["name"]); name = html.escape(p["name"])
-    L = ["<b>" + html.escape(hl) + "</b>",
+    L = ["<b>" + html.escape(vit) + "</b>",
+         "<b>" + html.escape(hl) + "</b>",
          f"💥 <b>{name}</b>" + (f" ({g})" if g else ""),
          f"<s>de {brl(de)}</s> por <b>{brl(por)}</b>",
          f"▼ caiu {int(pct_of(p))}%"]
@@ -251,15 +269,30 @@ def tg(method, payload):
 
 def send_item(it):
     cap, btn = CAPS[it["kind"]](it)
-    payload = {"chat_id": CHANNEL_ID, "photo": image_for(it.get("image_url")),
-               "caption": cap, "parse_mode": "HTML"}
-    if it.get("link"):
-        payload["reply_markup"] = json.dumps({"inline_keyboard": [[{"text": btn, "url": it["link"]}]]})
-    if not payload["photo"]:                              # sem foto -> manda texto
-        return tg("sendMessage", {"chat_id": CHANNEL_ID, "text": cap, "parse_mode": "HTML",
-                                  "disable_web_page_preview": True,
-                                  **({"reply_markup": payload["reply_markup"]} if it.get("link") else {})})
-    return tg("sendPhoto", payload)
+    kb = json.dumps({"inline_keyboard": [[{"text": btn, "url": it["link"]}]]}) if it.get("link") else None
+    # candidatos de foto: proxy -> URL original (se diferente)
+    photos, u = [], it.get("image_url")
+    if u:
+        pu = image_for(u)
+        photos.append(pu)
+        if pu != u:
+            photos.append(u)
+    last = None
+    for ph in photos:
+        payload = {"chat_id": CHANNEL_ID, "photo": ph, "caption": cap, "parse_mode": "HTML"}
+        if kb: payload["reply_markup"] = kb
+        r = tg("sendPhoto", payload)
+        if r.get("ok"): return r
+        last = r
+        time.sleep(1)
+    # fallback final: texto com botão (o post NUNCA deixa de sair)
+    payload = {"chat_id": CHANNEL_ID, "text": cap, "parse_mode": "HTML",
+               "disable_web_page_preview": True}
+    if kb: payload["reply_markup"] = kb
+    r = tg("sendMessage", payload)
+    if r.get("ok") and last:
+        r["nota"] = f"foto falhou ({(last.get('description') or '?')}), enviado como texto"
+    return r
 
 def send_text(text):
     return tg("sendMessage", {"chat_id": CHANNEL_ID, "text": text,
@@ -281,14 +314,37 @@ def dedupe_by_id(items):
             seen.add(i); out.append(p)
     return out
 
+def fetch_pool(key):
+    # tenta do mais completo ao mais simples (colunas/filtros podem variar no schema)
+    cols = "id,name,product_brand,brand_name,original_price,final_price,discount,coupon_code,link,image_url,category_slug"
+    cols2 = "id,name,brand_name,original_price,final_price,discount,coupon_code,link,image_url,category_slug"
+    tries = [
+        f"coupons?select={cols}&archived=eq.false&is_verified=eq.true&limit={POOL_LIMIT}",
+        f"coupons?select={cols}&is_verified=eq.true&limit={POOL_LIMIT}",
+        f"coupons?select={cols2}&is_verified=eq.true&limit={POOL_LIMIT}",
+        f"coupons?select=*&is_verified=eq.true&limit={POOL_LIMIT}",
+    ]
+    for q in tries:
+        try:
+            r = rest(q, key)
+            if isinstance(r, list):
+                return r
+        except Exception as e:
+            print(f"  (pool: tentativa falhou: {e})")
+    return []
+
 def collect(key):
     d = {}
     d["price_drops"] = safe(rpc, "home_price_drops", key, label="price_drops")
     d["hero_shoes"]  = safe(rpc, "home_hero_shoes", key, label="hero_shoes")
     d["essentials"]  = safe(rpc, "home_essentials", key, label="essentials")
-    cols = "id,name,product_brand,brand_name,original_price,final_price,discount,coupon_code,link,image_url,category_slug"
-    d["pool"] = safe(rest, f"coupons?select={cols}&archived=eq.false&is_verified=eq.true&limit={POOL_LIMIT}",
-                     key, label="pool")
+    d["pool"] = fetch_pool(key)
+    # marca a vitrine de origem (1ª ocorrência vence no dedupe)
+    for src, lst in (("caiu", d["price_drops"]), ("destaque", d["hero_shoes"]),
+                     ("essenciais", d["essentials"]), ("pool", d["pool"])):
+        for p in lst:
+            if isinstance(p, dict):
+                p.setdefault("vitrine", src)
     pc = "id,name,city,state,date,modality,discount,coupon_code,link,image_url,subtitle,valid_until,category_slug"
     d["provas"] = safe(rest, (f"coupons?select={pc}&is_verified=eq.true&category_slug=eq.provas"
                               f"&coupon_code=not.is.null&date=gte.{TODAY.isoformat()}&order=date.asc.nullslast&limit=25"),
@@ -356,16 +412,21 @@ def main():
     print(f"  montado: {len(shoes)} tênis + {len(varied)} variados + {len(viagem)} viagem "
           f"+ {len(provas)} provas + {len(servico)} serviço = {len(items)} itens (LIVE={sum(1 for x in shoes+varied if is_live(x))})\n")
 
-    posted_ids = []
+    posted_ids, sent = [], 0
     for i, it in enumerate(items, 1):
         cap, _ = CAPS[it["kind"]](it)
         print(f"── {i}. [{it['kind']}] ──\n{cap}\n[foto] {image_for(it.get('image_url'))}\n[🔗] {it.get('link')}\n")
         if SEND:
             r = send_item(it)
             ok = r.get("ok")
-            print("   ✓ enviado" if ok else f"   ✗ {r}")
-            if ok and it["kind"] == "produto": posted_ids.append(it["id"])
+            nota = f" ({r['nota']})" if r.get("nota") else ""
+            print(f"   ✓ enviado{nota}" if ok else f"   ✗ {r}")
+            if ok:
+                sent += 1
+                if it["kind"] == "produto": posted_ids.append(it["id"])
             time.sleep(DELAY)
+    if SEND:
+        print(f"\n  == ENVIADOS: {sent}/{len(items)} ==")
 
     g = guia_text(SLOT)
     if g:
