@@ -1,0 +1,78 @@
+name: Disparo Telegram Runners Brasil
+
+# 4 disparos por dia (BRT = UTC-3). Cron do GitHub roda em UTC:
+#   07:00 BRT = 10:00 UTC | 12:00 BRT = 15:00 UTC
+#   16:00 BRT = 19:00 UTC | 19:00 BRT = 22:00 UTC
+on:
+  schedule:
+    - cron: '0 10 * * *'   # 07:00 BRT
+    - cron: '0 15 * * *'   # 12:00 BRT
+    - cron: '0 19 * * *'   # 16:00 BRT
+    - cron: '0 22 * * *'   # 19:00 BRT
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: 'Horário do disparo'
+        type: choice
+        options: ['07','12','16','19']
+        default: '07'
+      dry_run:
+        description: 'Apenas prévia (não envia)'
+        type: boolean
+        default: true
+
+concurrency:
+  group: disparo-telegram
+  cancel-in-progress: false
+
+jobs:
+  disparo:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # para gravar o estado de dedupe de volta no repo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Definir SLOT e SEND
+        run: |
+          case "${{ github.event.schedule }}" in
+            "0 10 * * *") echo "SLOT=07" >> $GITHUB_ENV ;;
+            "0 15 * * *") echo "SLOT=12" >> $GITHUB_ENV ;;
+            "0 19 * * *") echo "SLOT=16" >> $GITHUB_ENV ;;
+            "0 22 * * *") echo "SLOT=19" >> $GITHUB_ENV ;;
+            *) echo "SLOT=${{ github.event.inputs.slot }}" >> $GITHUB_ENV ;;
+          esac
+          # Agendado => envio real. Manual => só envia se dry_run=false.
+          if [ -z "${{ github.event.schedule }}" ] && [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "SEND=" >> $GITHUB_ENV
+          else
+            echo "SEND=1" >> $GITHUB_ENV
+          fi
+
+      - name: Rodar disparador
+        env:
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          # ajuste fino opcional (ou deixe os padrões):
+          N_PRODUCTS: '10'
+          DEDUPE_DAYS: '3'
+          SUPER_DROP: '55'
+          LIVE_BONUS: '15'
+        run: python dispatcher.py
+
+      - name: Salvar estado de dedupe
+        if: env.SEND == '1'
+        run: |
+          if [ -n "$(git status --porcelain state)" ]; then
+            git config user.name  "rb-disparador-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add state
+            git commit -m "dedupe: estado do disparo ${SLOT}:00 ($(date -u +%F))"
+            git push
+          else
+            echo "Sem mudanças de estado para salvar."
+          fi
