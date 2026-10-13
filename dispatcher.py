@@ -3,8 +3,8 @@
 """
 Runners Brasil — Disparador de Ofertas no Telegram (produção)
 =============================================================
-1 disparo por horário (07:00 / 12:00 / 16:00 / 19:00 BRT), pelo GitHub Actions.
-Cada item = 1 post com FOTO + legenda. Guia de Cupons (Grupo 1 às 07:00, Grupo 2 às 16:00).
+1 disparo por horário (07:00 / 13:00 / 18:30 BRT), pelo GitHub Actions.
+Cada item = 1 post com FOTO + legenda. Guia de Cupons (Grupo 1 às 07:00, Grupo 2 às 18:30).
 
 COMPOSIÇÃO DO DISPARO (15 itens, configurável):
   • 8 TÊNIS   — prioridade: "Caiu de preço" + "Tênis em destaque" (depois pool amplo)
@@ -47,7 +47,8 @@ DELAY      = float(os.environ.get("DELAY", "3"))
 
 BRT = timezone(timedelta(hours=-3))
 TODAY = datetime.now(BRT).date()
-SLOT_IDX = {"07": 0, "12": 1, "16": 2, "19": 3}.get(SLOT, 0)
+SLOT_IDX = {"07": 0, "13": 1, "1830": 2}.get(SLOT, 0)
+SLOT_LABEL = {"07": "07:00", "13": "13:00", "1830": "18:30"}.get(SLOT, SLOT)
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -114,8 +115,10 @@ def image_for(u):
         return u
     return image_proxy(u)
 
-def is_live(p):
-    return "live" in ((p.get("product_brand") or p.get("brand_name") or "").lower())
+PRIORITY_BRANDS = ("361", "coros", "flets", "pink cheeks", "housewhey", "velocita", "velocità", "qiaodan")
+def is_live(p):   # marcas prioritárias (ganham bônus no ranking)
+    b = ((p.get("product_brand") or "") + " " + (p.get("brand_name") or "")).lower()
+    return any(m in b for m in PRIORITY_BRANDS)
 
 def pct_of(p):
     v = p.get("discount_pct") or p.get("drop_pct")
@@ -215,14 +218,12 @@ GUIA = {
         ("COROS","RUNNERSBRASIL","coros.shop"),("Flets","RUNNERSBRASIL15","flets.com.br"),
         ("GUMM","RUNNERSBRASIL15","gumm.com.br"),("Hardyn","RUNNERSBRASIL","hardyn.com.br"),
         ("Housewhey","RUNNERSBRASIL10","housewhey.com.br"),("La Ganexa","RUNNERSBRASIL10","lojalaganexa.com.br")],
- "16": [("MoveOn","RUNNERSBRASIL12","lojamoveon.com.br"),("My Safe Sport","RUNNERSBRASIL12","mysafesport.com.br"),
+ "1830": [("MoveOn","RUNNERSBRASIL12","lojamoveon.com.br"),("My Safe Sport","RUNNERSBRASIL12","mysafesport.com.br"),
         ("Pink Cheeks","PNK-RUNNERSBRASILOFICIAL","pinkcheeks.com.br"),("Qiaodan","RUNNERSBRASIL10","qiaodanbrasil.com.br"),
         ("Rikam","RUNNERSBRASIL10","lojarikam.com.br"),("Safe Runners","RUNNERSBRASIL10","runnershop.com.br"),
         ("Sub4 Turismo Esportivo","RUNNERSBRASIL5","sub4.com.br"),("YOPP","RUNNERSBRASIL12","yopp.com.br")],
 }
-GUIA_FOOTER = ("🏬 <b>Grandes lojas</b> (desconto direto no link): Netshoes · Centauro · "
-               "Decathlon · Asics · Adidas · Mizuno · New Balance · Under Armour · Olympikus\n"
-               "👉 Tudo em https://runnersbrasil.com/cupons")
+GUIA_FOOTER = "👉 Todos os cupons em https://runnersbrasil.com/cupons"
 def guia_text(slot):
     grupo = GUIA.get(slot)
     if not grupo: return None
@@ -304,6 +305,8 @@ def send_text(text):
 # ---------------------------------------------------------------- coleta
 def valid_product(p):
     try:
+        if any(x in str(p.get("link") or "") for x in ("awin1.com", "rakuten", "linksynergy", "tidd.ly")):
+            return False                      # plataformas removidas: só lojas próprias
         return (p.get("id") and p.get("link") and p.get("original_price") and p.get("final_price")
                 and float(p["final_price"]) > 0 and float(p["original_price"]) > 0 and pct_of(p) > 0)
     except Exception:
@@ -391,11 +394,11 @@ def rotate(items, n, today):
     # nunca repete item já postado hoje; blocos de n avançam por slot (sem sobrepor)
     items = [p for p in items if p.get("id") and p["id"] not in today]
     if not items: return []
-    start = ((TODAY.toordinal() * 4 + SLOT_IDX) * n) % len(items)
+    start = ((TODAY.toordinal() * 3 + SLOT_IDX) * n) % len(items)
     return [items[(start + i) % len(items)] for i in range(min(n, len(items)))]
 
 def main():
-    print(f"== Disparo {SLOT}:00 BRT — {TODAY.isoformat()} — {'ENVIO REAL' if SEND else 'PRÉVIA'} ==")
+    print(f"== Disparo {SLOT_LABEL} BRT — {TODAY.isoformat()} — {'ENVIO REAL' if SEND else 'PRÉVIA'} ==")
     key = get_anon_key()
     d = collect(key)
     recent = load_recent_ids()
@@ -411,7 +414,9 @@ def main():
     for p in d["provas"]:  p["kind"] = "prova"
     for p in d["servico"]: p["kind"] = "servico"
     viagem  = rotate(d["viagem"], N_VIAGEM, today)
-    provas  = rotate([p for p in d["provas"] if p.get("link")], N_PROVAS, today)
+    pl = [p for p in d["provas"] if p.get("link")]
+    pl.sort(key=lambda p: 0 if "live" in ((p.get("name") or "") + (p.get("link") or "")).lower() else 1)
+    provas  = rotate(pl, N_PROVAS, today)   # provas da Live Run primeiro
     servico = rotate([p for p in d["servico"] if p.get("link")], N_SERVICO, today)
 
     # ordem do disparo: tênis -> variados -> viagem -> provas -> serviço
