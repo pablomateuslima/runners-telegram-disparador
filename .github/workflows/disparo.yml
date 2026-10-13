@@ -1,20 +1,19 @@
 name: Disparo Telegram Runners Brasil
 
-# 4 disparos por dia (BRT = UTC-3). Cron do GitHub roda em UTC:
-#   07:00 BRT = 10:00 UTC | 12:00 BRT = 15:00 UTC
-#   16:00 BRT = 19:00 UTC | 19:00 BRT = 22:00 UTC
+# 3 disparos por dia (BRT = UTC-3). Cron do GitHub roda em UTC:
+# 07:00 BRT = 10:00 UTC | 13:00 BRT = 16:00 UTC
+# 18:30 BRT = 21:30 UTC
 on:
   schedule:
     - cron: '0 10 * * *'   # 07:00 BRT
-    - cron: '0 15 * * *'   # 12:00 BRT
-    - cron: '0 19 * * *'   # 16:00 BRT
-    - cron: '0 22 * * *'   # 19:00 BRT
+    - cron: '0 16 * * *'   # 13:00 BRT
+    - cron: '30 21 * * *'  # 18:30 BRT
   workflow_dispatch:
     inputs:
       slot:
         description: 'Horário do disparo'
         type: choice
-        options: ['07','12','16','19']
+        options: ['07','13','1830']
         default: '07'
       dry_run:
         description: 'Apenas prévia (não envia)'
@@ -41,9 +40,8 @@ jobs:
         run: |
           case "${{ github.event.schedule }}" in
             "0 10 * * *") echo "SLOT=07" >> $GITHUB_ENV ;;
-            "0 15 * * *") echo "SLOT=12" >> $GITHUB_ENV ;;
-            "0 19 * * *") echo "SLOT=16" >> $GITHUB_ENV ;;
-            "0 22 * * *") echo "SLOT=19" >> $GITHUB_ENV ;;
+            "0 16 * * *") echo "SLOT=13" >> $GITHUB_ENV ;;
+            "30 21 * * *") echo "SLOT=1830" >> $GITHUB_ENV ;;
             *) echo "SLOT=${{ github.event.inputs.slot }}" >> $GITHUB_ENV ;;
           esac
           # Agendado => envio real. Manual => só envia se dry_run=false.
@@ -71,7 +69,7 @@ jobs:
             git config user.name  "rb-disparador-bot"
             git config user.email "actions@users.noreply.github.com"
             git add state
-            git commit -m "dedupe: estado do disparo ${SLOT}:00 ($(date -u +%F))"
+            git commit -m "dedupe: estado do disparo ${SLOT} ($(date -u +%F))"
             git push
           else
             echo "Sem mudanças de estado para salvar."
